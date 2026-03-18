@@ -1,0 +1,472 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Three.js Real-time Gesture Particle System</title>
+  <style>
+    :root{
+      --bg:#0b0f14;
+      --panel:#0f1720cc;
+      --muted:#9aa6b2;
+      --accent:#4f9aff;
+    }
+    html,body{height:100%;margin:0;background:linear-gradient(180deg,#05060a 0%, #0b1020 100%);font-family:Inter,system-ui,Segoe UI,Roboto,Helvetica,Arial;}
+    #app{position:relative;height:100vh;overflow:hidden}
+    canvas{display:block}
+    /* UI panel */
+    .ui{
+      position:fixed;top:18px;right:18px;width:260px;padding:14px;border-radius:12px;
+      background:var(--panel);backdrop-filter:blur(6px);box-shadow:0 6px 24px rgba(0,0,0,.6);color:#e6eef6;
+      font-size:13px;z-index:10;
+    }
+    .ui h3{margin:0 0 8px 0;font-weight:600;font-size:15px;color:var(--accent)}
+    .row{display:flex;align-items:center;gap:8px;margin:8px 0}
+    label{font-size:12px;color:var(--muted);min-width:60px}
+    select,input[type="color"],input[type="range"]{flex:1;padding:6px;border-radius:8px;border:0;background:#0b1220;color:#fff}
+    .small{font-size:12px;color:var(--muted);margin-top:6px}
+    button.btn{
+      margin-top:8px;padding:8px 10px;border-radius:10px;border:0;background:var(--accent);color:#02102a;font-weight:700;cursor:pointer
+    }
+    .footer-hint{font-size:11px;color:var(--muted);margin-top:8px;text-align:center}
+    /* Camera preview small window */
+    #cameraPreview{
+      position:fixed;right:18px;bottom:18px;width:180px;height:120px;border-radius:10px;overflow:hidden;z-index:11;
+      box-shadow:0 8px 24px rgba(0,0,0,.6);border:1px solid rgba(255,255,255,.04);transform:scaleX(-1)
+    }
+    #cameraPreview video{width:100%;height:100%;object-fit:cover;display:block;transform:scaleX(-1)}
+    /* top-left watermark */
+    .watermark{
+      position:fixed;left:18px;top:18px;z-index:11;font-weight:800;font-size:18px;display:flex;gap:4px;align-items:center;
+      color:#fff;mix-blend-mode:screen;
+    }
+    .watermark .blue{color:var(--accent)}
+    /* responsive tweaks */
+    @media (max-width:600px){
+      .ui{width:88%;left:50%;transform:translateX(-50%);right:auto}
+      #cameraPreview{right:12px;bottom:110px;width:140px;height:100px}
+    }
+  </style>
+</head>
+<body>
+  <div id="app">
+    <div class="watermark"><span class="blue">Abib</span><span>Kah</span></div>
+
+    <div class="ui" id="uiPanel">
+      <h3>Particle Lab</h3>
+
+      <div class="row">
+        <label>Shape</label>
+        <select id="shapeSelect">
+          <option value="galaxy">Galaxy</option>
+          <option value="heart">Heart</option>
+          <option value="saturn">Saturn</option>
+          <option value="flower">Flower</option>
+          <option value="sphere">Sphere</option>
+        </select>
+      </div>
+
+      <div class="row">
+        <label>Color</label>
+        <input id="colorPicker" type="color" value="#6ec1ff" />
+      </div>
+
+      <div class="row">
+        <label>Count</label>
+        <input id="countRange" type="range" min="1000" max="12000" step="500" value="4000" />
+      </div>
+
+      <div class="row">
+        <label>Size</label>
+        <input id="sizeRange" type="range" min="0.5" max="6" step="0.1" value="2" />
+      </div>
+
+      <div class="row">
+        <label>Smooth</label>
+        <input id="smoothRange" type="range" min="0.01" max="0.3" step="0.01" value="0.08" />
+      </div>
+
+      <button class="btn" id="regenBtn">Regenerate</button>
+      <button class="btn" id="fsBtn" style="background:#202e3f;margin-left:8px">Fullscreen</button>
+      <div class="footer-hint">Open/close hand to expand/contract particles</div>
+    </div>
+
+    <div id="cameraPreview" aria-hidden="true">
+      <video id="webcam" autoplay playsinline></video>
+    </div>
+
+    <canvas id="gl"></canvas>
+  </div>
+
+  <script type="module">
+    import * as THREE from 'https://cdn.jsdelivr.net/npm/three@0.150.1/build/three.module.js';
+    import {OrbitControls} from 'https://cdn.jsdelivr.net/npm/three@0.150.1/examples/jsm/controls/OrbitControls.js';
+    import {Hands} from 'https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js?module';
+    import {Camera as MPCamera} from 'https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js?module';
+
+    // DOM
+    const canvas = document.getElementById('gl');
+    const video = document.getElementById('webcam');
+    const shapeSelect = document.getElementById('shapeSelect');
+    const colorPicker = document.getElementById('colorPicker');
+    const regenBtn = document.getElementById('regenBtn');
+    const fsBtn = document.getElementById('fsBtn');
+    const countRange = document.getElementById('countRange');
+    const sizeRange = document.getElementById('sizeRange');
+    const smoothRange = document.getElementById('smoothRange');
+
+    // THREE setup
+    const renderer = new THREE.WebGLRenderer({canvas, antialias:true, alpha:true});
+    renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+    renderer.setClearColor(0x000000, 0); // transparent background
+
+    const scene = new THREE.Scene();
+    const camera = new THREE.PerspectiveCamera(50, window.innerWidth/window.innerHeight, 0.1, 2000);
+    camera.position.set(0, 0, 120);
+
+    const controls = new OrbitControls(camera, renderer.domElement);
+    controls.enableDamping = true;
+    controls.dampingFactor = 0.06;
+    controls.minDistance = 30;
+    controls.maxDistance = 400;
+
+    // lights (subtle)
+    scene.add(new THREE.AmbientLight(0xffffff, 0.25));
+    const dir = new THREE.DirectionalLight(0xffffff, 0.6);
+    dir.position.set(0.5, 1, 1);
+    scene.add(dir);
+
+    // particle system variables
+    let particleSystem = null;
+    let basePositions = null; // Float32Array base
+    let directions = null; // Float32Array normalized directions
+    let particleCount = parseInt(countRange.value, 10);
+    let particleMaterial;
+    let geometry;
+    let currentExpansion = 0;
+    let targetExpansion = 0;
+    let smoothFactor = parseFloat(smoothRange.value);
+    let pointSize = parseFloat(sizeRange.value);
+
+    // create default particle system
+    initParticleSystem();
+
+    // helpers: random
+    const rand = (a,b)=> a + Math.random()*(b-a);
+
+    // shape generators
+    function generatePositions(shape, count){
+      const positions = new Float32Array(count*3);
+      const dirs = new Float32Array(count*3);
+
+      if(shape === 'galaxy'){
+        // spiral galaxy with arms
+        const arms = 4;
+        const radiusMax = 60;
+        for(let i=0;i<count;i++){
+          const r = Math.pow(Math.random(), 0.8) * radiusMax;
+          const branch = (i % arms) * (Math.PI*2/arms);
+          const spin = r * 0.25; // twist
+          const angle = branch + spin + (Math.random()-0.5)*0.6;
+          const x = r * Math.cos(angle) + rand(-2,2);
+          const y = (Math.random()-0.5) * 8 + rand(-1,1);
+          const z = r * Math.sin(angle) + rand(-2,2);
+          positions[3*i]=x; positions[3*i+1]=y; positions[3*i+2]=z;
+          // direction outward
+          const len = Math.hypot(x,y,z) || 1;
+          dirs[3*i]=x/len; dirs[3*i+1]=y/len; dirs[3*i+2]=z/len;
+        }
+      } else if(shape === 'heart'){
+        // parametric heart curve in 2D, scatter slightly in z
+        const scale = 2.2;
+        for(let i=0;i<count;i++){
+          const t = Math.random()*Math.PI*2;
+          // heart curve
+          const x = 16*Math.pow(Math.sin(t),3);
+          const y = 13*Math.cos(t) - 5*Math.cos(2*t) - 2*Math.cos(3*t) - Math.cos(4*t);
+          const r = (Math.random()*0.8 + 0.2) * scale;
+          const px = x * r;
+          const py = y * r * -1; // flip for better orientation
+          const pz = (Math.random()-0.5) * 6;
+          positions[3*i]=px; positions[3*i+1]=py; positions[3*i+2]=pz;
+          const len = Math.hypot(px,py,pz)||1;
+          dirs[3*i]=px/len; dirs[3*i+1]=py/len; dirs[3*i+2]=pz/len;
+        }
+      } else if(shape === 'saturn'){
+        // planet + rings
+        const planetRadius = 18;
+        const ringInner = 26;
+        const ringOuter = 44;
+        const half = Math.floor(count*0.45);
+        // planet sphere
+        for(let i=0;i<half;i++){
+          const u = Math.random();
+          const v = Math.random();
+          const theta = 2*Math.PI*u;
+          const phi = Math.acos(2*v-1);
+          const r = planetRadius * (0.9 + Math.random()*0.2);
+          const x = r * Math.sin(phi) * Math.cos(theta);
+          const y = r * Math.sin(phi) * Math.sin(theta);
+          const z = r * Math.cos(phi);
+          positions[3*i]=x; positions[3*i+1]=y; positions[3*i+2]=z;
+          const len = Math.hypot(x,y,z)||1;
+          dirs[3*i]=x/len; dirs[3*i+1]=y/len; dirs[3*i+2]=z/len;
+        }
+        // rings
+        for(let i=half;i<count;i++){
+          const t = Math.random()*Math.PI*2;
+          const r = Math.sqrt(Math.random()) * (ringOuter - ringInner) + ringInner;
+          const x = r * Math.cos(t) + rand(-1.2,1.2);
+          const y = (Math.random()-0.5) * 1.2;
+          const z = r * Math.sin(t) + rand(-1.2,1.2);
+          positions[3*i]=x; positions[3*i+1]=y; positions[3*i+2]=z;
+          const len = Math.hypot(x,y,z)||1;
+          dirs[3*i]=x/len; dirs[3*i+1]=y/len; dirs[3*i+2]=z/len;
+        }
+      } else if(shape === 'flower'){
+        // polar rose r = cos(k*theta) ; sample many theta
+        const k = 6;
+        const scale = 18;
+        for(let i=0;i<count;i++){
+          const theta = Math.random()*Math.PI*2;
+          const rr = Math.abs(Math.cos(k*theta)) * (0.3 + Math.random()*1.0) * scale;
+          const x = rr * Math.cos(theta) + rand(-1.4,1.4);
+          const y = rr * Math.sin(theta) + rand(-1.4,1.4);
+          const z = (Math.random()-0.5)*6;
+          positions[3*i]=x; positions[3*i+1]=y; positions[3*i+2]=z;
+          const len = Math.hypot(x,y,z)||1;
+          dirs[3*i]=x/len; dirs[3*i+1]=y/len; dirs[3*i+2]=z/len;
+        }
+      } else { // sphere fallback
+        const radius=36;
+        for(let i=0;i<count;i++){
+          const u = Math.random();
+          const v = Math.random();
+          const theta = 2*Math.PI*u;
+          const phi = Math.acos(2*v-1);
+          const r = radius * (0.85 + Math.random()*0.3);
+          const x = r * Math.sin(phi) * Math.cos(theta);
+          const y = r * Math.sin(phi) * Math.sin(theta);
+          const z = r * Math.cos(phi);
+          positions[3*i]=x; positions[3*i+1]=y; positions[3*i+2]=z;
+          const len = Math.hypot(x,y,z)||1;
+          dirs[3*i]=x/len; dirs[3*i+1]=y/len; dirs[3*i+2]=z/len;
+        }
+      }
+
+      return {positions, dirs};
+    }
+
+    function initParticleSystem(){
+      particleCount = parseInt(countRange.value, 10);
+      if(particleSystem){
+        scene.remove(particleSystem);
+        geometry.dispose();
+        particleMaterial.dispose();
+      }
+
+      const shape = shapeSelect.value;
+      const {positions, dirs} = generatePositions(shape, particleCount);
+
+      basePositions = positions;
+      directions = dirs;
+
+      geometry = new THREE.BufferGeometry();
+      geometry.setAttribute('position', new THREE.BufferAttribute(new Float32Array(basePositions), 3));
+      // randomness attribute for subtle motion
+      const randAttr = new Float32Array(particleCount);
+      for(let i=0;i<particleCount;i++) randAttr[i] = Math.random();
+      geometry.setAttribute('aRand', new THREE.BufferAttribute(randAttr, 1));
+
+      // material
+      particleMaterial = new THREE.PointsMaterial({
+        size: pointSize,
+        sizeAttenuation: true,
+        depthWrite: false,
+        blending: THREE.AdditiveBlending,
+        color: new THREE.Color(colorPicker.value),
+      });
+
+      particleSystem = new THREE.Points(geometry, particleMaterial);
+      particleSystem.frustumCulled = false;
+      scene.add(particleSystem);
+
+      // center and scale nicely
+      particleSystem.position.set(0,0,0);
+      particleSystem.scale.set(1,1,1);
+    }
+
+    // regenerate on UI
+    regenBtn.addEventListener('click', ()=> {
+      initParticleSystem();
+    });
+    shapeSelect.addEventListener('change', ()=> initParticleSystem());
+    countRange.addEventListener('input', ()=> {}); // regen button intentionally required to avoid accidental heavy regen
+    sizeRange.addEventListener('input', ()=> {
+      pointSize = parseFloat(sizeRange.value);
+      if(particleMaterial) particleMaterial.size = pointSize;
+    });
+    smoothRange.addEventListener('input', ()=> {
+      smoothFactor = parseFloat(smoothRange.value);
+    });
+    colorPicker.addEventListener('input', ()=> {
+      if(particleMaterial) particleMaterial.color.set(colorPicker.value);
+    });
+
+    fsBtn.addEventListener('click', async ()=>{
+      const el = document.documentElement;
+      if(!document.fullscreenElement) await el.requestFullscreen().catch(()=>{});
+      else document.exitFullscreen();
+    });
+
+    window.addEventListener('resize', onWindowResize, false);
+    function onWindowResize(){
+      camera.aspect = window.innerWidth/window.innerHeight;
+      camera.updateProjectionMatrix();
+      renderer.setSize(window.innerWidth, window.innerHeight);
+    }
+    onWindowResize();
+
+    // simple utility
+    function distance3(a,b){
+      const dx = a.x - b.x, dy = a.y - b.y, dz = (a.z||0) - (b.z||0);
+      return Math.hypot(dx,dy,dz);
+    }
+
+    // MediaPipe Hands setup
+    let lastHandScore = 0;
+    async function startHands(){
+      // get webcam for preview and MediaPipe
+      const stream = await navigator.mediaDevices.getUserMedia({video:{facingMode:'user'}, audio:false});
+      video.srcObject = stream;
+      await video.play();
+
+      const hands = new Hands({
+        locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`
+      });
+
+      hands.setOptions({
+        maxNumHands: 1,
+        modelComplexity: 1,
+        minDetectionConfidence: 0.6,
+        minTrackingConfidence: 0.5
+      });
+
+      hands.onResults((results) => {
+        if(results.multiHandLandmarks && results.multiHandLandmarks.length){
+          const lm = results.multiHandLandmarks[0];
+          const openScore = calcOpenScore(lm);
+          // map openScore [0..1] to expansion [0..1]
+          targetExpansion = openScore;
+          lastHandScore = openScore;
+        } else {
+          // if no hand, slowly revert
+          targetExpansion = 0;
+        }
+      });
+
+      const mpCam = new MPCamera(video, {
+        onFrame: async () => {
+          await hands.send({image: video});
+        },
+        width: 640,
+        height: 480
+      });
+      mpCam.start();
+    }
+
+    // compute "openness" of hand by average fingertip distance from wrist normalized
+    function calcOpenScore(landmarks){
+      // landmarks: array of {x,y,z} normalized to image coords. Convert to 3D metric by using relative distances in image space
+      const wrist = landmarks[0];
+      const mcp = landmarks[9]; // middle finger mcp as baseline
+      const tipsIdx = [8,12,16,20]; // index, middle, ring, pinky tips
+      // compute average distance wrist->tips
+      let avg = 0;
+      for(const i of tipsIdx){
+        avg += distance3({x:wrist.x,y:wrist.y,z:wrist.z}, {x:landmarks[i].x,y:landmarks[i].y,z:landmarks[i].z});
+      }
+      avg /= tipsIdx.length;
+      const base = distance3({x:wrist.x,y:wrist.y,z:wrist.z}, {x:mcp.x,y:mcp.y,z:mcp.z}) || 0.0001;
+      // ratio bigger => open
+      let ratio = avg / base;
+      // normalize roughly into 0..1 (heuristic)
+      // closed-ish ratio ~0.8-1.1, open ~1.4-3.0 depending on camera
+      const norm = (ratio - 0.9) / (2.2 - 0.9);
+      const clamped = Math.max(0, Math.min(1, norm));
+      return clamped;
+    }
+
+    // animation loop
+    let lastTime = performance.now();
+    function animate(t){
+      requestAnimationFrame(animate);
+      const dt = (t - lastTime)/1000 || 0;
+      lastTime = t;
+
+      controls.update();
+
+      // smooth expansion interpolation
+      currentExpansion += (targetExpansion - currentExpansion) * (1 - Math.exp(-smoothFactor*60*dt));
+      // subtle pulsing
+      const time = t * 0.001;
+
+      if(basePositions && geometry){
+        const posAttr = geometry.attributes.position;
+        const rnd = geometry.attributes.aRand;
+        // update positions in-place: base + direction * (currentExpansion * factor * (randomized + sin wave))
+        const strength = 40; // maximum displacement magnitude
+        for(let i=0;i<particleCount;i++){
+          const bx = basePositions[3*i];
+          const by = basePositions[3*i+1];
+          const bz = basePositions[3*i+2];
+          const dx = directions[3*i];
+          const dy = directions[3*i+1];
+          const dz = directions[3*i+2];
+          const r = rnd.array ? rnd.array[i] : rnd[i];
+          const jitter = Math.sin(time*1.2 + r*10)*0.35 + (Math.random()-0.5)*0.02;
+          const disp = currentExpansion * (0.3 + r*0.9) * strength;
+          posAttr.array[3*i]   = bx + dx * disp + jitter;
+          posAttr.array[3*i+1] = by + dy * disp + jitter*0.6;
+          posAttr.array[3*i+2] = bz + dz * disp + jitter*0.4;
+        }
+        posAttr.needsUpdate = true;
+      }
+
+      // update material size gently for dynamic feel
+      if(particleMaterial){
+        particleMaterial.size = pointSize * (1 + currentExpansion*0.8);
+        particleMaterial.color.set(colorPicker.value);
+      }
+
+      renderer.render(scene, camera);
+    }
+
+    // Start everything
+    startHands().catch((err)=> {
+      console.warn('Webcam/Hands failed',err);
+      // if camera blocked, hide preview
+      document.getElementById('cameraPreview').style.display = 'none';
+    });
+    requestAnimationFrame(animate);
+
+    // initial resize and renderer size
+    function fitToWindow(){
+      renderer.setSize(window.innerWidth, window.innerHeight);
+      camera.aspect = window.innerWidth/window.innerHeight;
+      camera.updateProjectionMatrix();
+    }
+    fitToWindow();
+
+    // small convenience: allow space key to toggle pause
+    let paused = false;
+    window.addEventListener('keydown', (e)=>{
+      if(e.code === 'Space') {
+        paused = !paused;
+        if(paused) renderer.setAnimationLoop(null);
+        else renderer.setAnimationLoop(animate);
+      }
+    });
+  </script>
+</body>
+</html>
